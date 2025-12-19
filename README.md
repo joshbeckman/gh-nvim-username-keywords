@@ -2,6 +2,9 @@
 
 A [GitHub CLI extension](https://docs.github.com/en/github-cli/github-cli/creating-github-cli-extensions) that adds GitHub usernames to your nvim keywords file for autocomplete. It discovers usernames from your GitHub teams and PR activity, making it easy to @-mention colleagues.
 
+<img width="718" height="261" alt="Example dry-run output" src="https://github.com/user-attachments/assets/a9ff579d-762a-4279-912b-0de62ee8a84f" />
+
+
 ## Installation
 
 Install this GitHub CLI extension using:
