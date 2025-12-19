@@ -1,0 +1,162 @@
+#!/bin/bash
+# gh-nvim-username-keywords: Add new GitHub users to nvim keywords.txt from teams and activity
+#
+# Only adds usernames not already present. Never removes entries.
+#
+# Sources:
+# 1. GitHub teams you're a member of
+# 2. Recent PR reviewers and authors you've interacted with
+#
+# Usage:
+#   gh nvim-username-keywords                          # Use defaults
+#   gh nvim-username-keywords --team org/team-name     # Add a team (repeatable)
+#   gh nvim-username-keywords --repo org/repo-name     # Add activity from a repo (repeatable)
+#   gh nvim-username-keywords --limit 50               # Override PR limit
+#   gh nvim-username-keywords --dry-run --verbose      # Preview with progress
+
+set -euo pipefail
+
+KEYWORDS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/nvim/keywords.txt"
+VERBOSE=${VERBOSE:-false}
+DRY_RUN=false
+
+DEFAULT_PR_LIMIT=30
+
+TEAMS=()
+REPOS=()
+PR_LIMIT=""
+
+# Discover default repo from most recent PR activity
+get_default_repo() {
+    gh search prs --author=@me --sort=updated --limit=1 --json repository --jq '.[0].repository.nameWithOwner' 2>/dev/null || true
+}
+
+# Discover default team from most recent team membership
+get_default_team() {
+    gh api user/teams --jq '.[0] | "\(.organization.login)/\(.slug)"' 2>/dev/null || true
+}
+
+# Bot accounts to exclude
+BOTS=(
+    copilot-pull-request-reviewer
+    dependabot
+    github-actions
+    github-advanced-security
+    graphite-app
+    pr-reviewer-agent
+)
+BOTS_PATTERN=$(IFS='|'; echo "${BOTS[*]}")
+
+log() {
+    if [[ "$VERBOSE" == "true" ]]; then
+        echo "[info] $*" >&2
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run) DRY_RUN=true; shift ;;
+        --verbose|-v) VERBOSE=true; shift ;;
+        --team) TEAMS+=("$2"); shift 2 ;;
+        --repo) REPOS+=("$2"); shift 2 ;;
+        --limit) PR_LIMIT="$2"; shift 2 ;;
+        -h|--help)
+            cat <<EOF
+Usage: gh nvim-username-keywords [OPTIONS]
+
+Add new GitHub users to nvim keywords.txt from teams and PR activity.
+
+Options:
+    --team ORG/SLUG   Add a team to query (repeatable)
+    --repo OWNER/NAME Add a repo to query (repeatable)
+    --limit N         Override PR limit (default: $DEFAULT_PR_LIMIT)
+    --dry-run         Show what would be added without writing
+    --verbose, -v     Show progress
+    -h, --help        Show this help
+
+Defaults (auto-discovered):
+    Team: your most recent team membership
+    Repo: your most recent PR activity
+EOF
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# Discover defaults if no explicit arguments provided
+if [[ ${#TEAMS[@]} -eq 0 ]]; then
+    default_team=$(get_default_team)
+    if [[ -n "$default_team" ]]; then
+        log "Auto-discovered team: $default_team"
+        TEAMS=("$default_team")
+    fi
+fi
+
+if [[ ${#REPOS[@]} -eq 0 ]]; then
+    default_repo=$(get_default_repo)
+    if [[ -n "$default_repo" ]]; then
+        log "Auto-discovered repo: $default_repo"
+        REPOS=("$default_repo")
+    fi
+fi
+
+PR_LIMIT="${PR_LIMIT:-$DEFAULT_PR_LIMIT}"
+
+collect_usernames() {
+    {
+        # Team members
+        for team in "${TEAMS[@]}"; do
+            log "Fetching members from team: $team"
+            local org="${team%%/*}"
+            local slug="${team##*/}"
+            gh api "orgs/$org/teams/$slug/members" --jq '.[].login' 2>/dev/null || true
+        done
+
+        # PR reviewers, authors, and commenters
+        for repo in "${REPOS[@]}"; do
+            log "Fetching PR activity from: $repo"
+            gh pr list --repo "$repo" --author @me --state all --limit "$PR_LIMIT" \
+                --json reviews,comments --jq '.[].reviews[].author.login, .[].comments[].author.login' 2>/dev/null || true
+            gh pr list --repo "$repo" --reviewed-by @me --state all --limit "$PR_LIMIT" \
+                --json author --jq '.[].author.login' 2>/dev/null || true
+        done
+    } | grep -vE "^($BOTS_PATTERN)$" | grep -v '^$' | sort -fu
+}
+
+main() {
+    log "Collecting usernames..."
+
+    # Get current entries (strip @ prefix for comparison)
+    local existing=""
+    if [[ -f "$KEYWORDS_FILE" ]]; then
+        existing=$(grep '^@' "$KEYWORDS_FILE" | sed 's/^@//' | sort -fu)
+    fi
+
+    # Collect new usernames
+    local discovered
+    discovered=$(collect_usernames)
+
+    # Find usernames not already in file
+    local new_users
+    new_users=$(comm -23 <(echo "$discovered") <(echo "$existing"))
+
+    if [[ -z "$new_users" ]]; then
+        echo "No new usernames to add."
+        exit 0
+    fi
+
+    local count
+    count=$(echo "$new_users" | wc -l | tr -d ' ')
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "Would add $count new entries:"
+        echo "$new_users" | sed 's/^/@/'
+    else
+        # Append new usernames with @ prefix
+        echo "$new_users" | sed 's/^/@/' >> "$KEYWORDS_FILE"
+        echo "Added $count new entries to $KEYWORDS_FILE"
+    fi
+}
+
+main
